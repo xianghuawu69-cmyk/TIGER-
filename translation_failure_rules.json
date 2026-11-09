@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "pipeline_version": "2026-08-staged-translation-v7",
+  "purpose": "将已发生的翻译故障固化为可执行规则与回归测试，避免同类故障复发。",
+  "resolved_rules": [
+    {
+      "id": "long-document-legacy-limit",
+      "symptom": "程序将 1,357,754 个字符误称为 1,357,754 字，并用旧字符限制拦截文档",
+      "resolution": "明确区分英文单词数与字符数；取消旧字符硬限制，使用分批翻译、缓存和断点续翻",
+      "regression_test": "test_long_documents_are_logged_for_batching_not_rejected"
+    },
+    {
+      "id": "model-json-extra-data",
+      "symptom": "模型在 JSON 后附加说明或第二个 JSON，解析报 Extra data",
+      "resolution": "解码第一个包含 translations 的完整 JSON 对象",
+      "regression_test": "test_parser_accepts_json_followed_by_model_commentary"
+    },
+    {
+      "id": "protected-token-loss",
+      "symptom": "模型丢失公式、URL、编号或特殊符号",
+      "resolution": "不可变占位符校验，丢失时按保护片段分离翻译并本地重建",
+      "regression_test": "test_duplicate_or_missing_placeholder_is_rejected"
+    },
+    {
+      "id": "single-source-character-residue",
+      "symptom": "译文只残留一个源语言字符",
+      "resolution": "单字符也视为质量故障，只重试缺陷段落并再次校验",
+      "regression_test": "test_single_character_source_residue_is_retried"
+    },
+    {
+      "id": "local-quality-failure-blocks-entire-job",
+      "symptom": "单个复杂公式段落仍有中文残留时，整份长文档从断点反复重启且无法推进",
+      "resolution": "局部翻译或纠错达到上限后隔离该段，保留最佳译文并继续后续批次；整文完成后由质检报告精确列出复核位置",
+      "regression_test": "test_unchanged_chinese_title_is_isolated_after_retry"
+    },
+    {
+      "id": "singleton-invalid-json-blocks-checkpoint",
+      "symptom": "超长文档拆分到单段后模型仍返回损坏 JSON，任务停在同一断点无法推进",
+      "resolution": "单段重试与保护片段重组都失败时隔离原段、记录位置并继续后续批次；已完成断点不回滚",
+      "regression_test": "test_singleton_invalid_json_is_isolated_and_batch_continues"
+    },
+    {
+      "id": "failure-log-prompt-pollution",
+      "symptom": "把历史错误日志和失败输出写进主翻译提示会干扰正常译文风格、术语和目标语言判断",
+      "resolution": "主模型仅接收源文、业务策略、语言、保护标记和已批准词库；错误详情只供验证器与局部修复器使用，不进入主提示和相邻批次",
+      "regression_test": "audit_primary_prompt_excludes_repair_rules"
+    },
+    {
+      "id": "completed-review-misclassified-as-resumable",
+      "symptom": "所有批次已完成且进度100%，但少量译文疑难被记录为失败，任务反复显示继续上次任务并重跑",
+      "resolution": "完成、疑难处理和失败使用独立状态；100%疑难只进入输出处理，提供候选译法、局部重译或忽略输出，禁止回到全文续翻",
+      "regression_test": "audit_completed_uncertainty_never_returns_to_resume"
+    },
+    {
+      "id": "checkpoint-atomic-replace-access-denied",
+      "symptom": "任务日志临时文件替换时遇到WinError 5，导致已完成进度被误判为任务故障",
+      "resolution": "断点使用唯一临时文件、原子替换、有限重试和幂等写入；日志写入失败不删除译文缓存",
+      "regression_test": "audit_checkpoint_write_is_atomic_and_retryable"
+    },
+    {
+      "id": "formula-and-target-text-false-residue",
+      "symptom": "公式命令、标识符或本来已经是目标语言的文字被误判为未翻译残留",
+      "resolution": "残留扫描先排除公式、代码、URL、专名、引用、锁定原文和目标语言文本，再判断是否需要局部重译",
+      "regression_test": "audit_residue_scan_excludes_immutable_and_target_text"
+    },
+    {
+      "id": "provider-failure-confused-with-content-failure",
+      "symptom": "密钥、余额、配额或供应商故障被当成内容质量问题，触发无意义重译",
+      "resolution": "认证、额度、限流和网络故障进入供应商路由；保持源文、断点和安全译文不变，切换备用模型或暂停等待",
+      "regression_test": "audit_provider_errors_do_not_modify_translation_state"
+    },
+    {
+      "id": "unbounded-repair-loop",
+      "symptom": "同一复杂段持续拆分、重试、恢复，长时间停在同一断点",
+      "resolution": "每级重试设明确上限；达到上限后隔离该单元、保留最佳安全译文并继续，整文完成后进入可操作的疑难处理",
+      "regression_test": "audit_every_repair_route_has_terminal_state"
+    },
+    {
+      "id": "desktop-completed-output-blocked-by-review",
+      "symptom": "全文批次已经完成，却因极少数可疑字符抛出异常、只生成待复核文件，并诱导用户再次续翻全文",
+      "resolution": "完成优先：始终生成正式译文；疑难位置写入独立质量报告，不抛任务异常、不回到断点、不重算安全批次",
+      "regression_test": "test_completed_docx_with_residue_is_delivered_not_raised"
+    },
+    {
+      "id": "journal-lock-aborts-document",
+      "symptom": "Windows 临时占用任务日志文件时，日志写入异常升级为翻译任务失败",
+      "resolution": "译文 SQLite 缓存作为恢复依据；任务日志写入锁仅记录警告，不能中止、回滚或重启正文翻译",
+      "regression_test": "test_task_journal_write_lock_does_not_abort_translation_state"
+    }
+  ]
+}
